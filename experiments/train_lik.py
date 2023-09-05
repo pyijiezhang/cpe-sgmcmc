@@ -324,6 +324,7 @@ def main(
     dirty_lik=True,
     prior_scale=1,
     augment=True,
+    perm=False,
     noise=0.1,
     likelihood="softmax",
     likelihood_temp=1,
@@ -356,6 +357,7 @@ def main(
             "lr": lr,
             "prior_scale": prior_scale,
             "augment": augment,
+            "perm": perm,
             "dirty_lik": dirty_lik,
             "temperature": temperature,
             "burn_in": burn_in,
@@ -376,19 +378,31 @@ def main(
         )
     elif dataset == "cifar10":
         train_data, test_data = get_cifar10(
-            root=data_dir, augment=bool(augment), label_noise=label_noise
+            root=data_dir,
+            augment=bool(augment),
+            label_noise=label_noise,
+            perm=bool(perm),
         )
     elif dataset == "cifar100":
         train_data, test_data = get_cifar100(
-            root=data_dir, augment=bool(augment), label_noise=label_noise
+            root=data_dir,
+            augment=bool(augment),
+            label_noise=label_noise,
+            perm=bool(perm),
         )
     elif dataset == "mnist":
         train_data, test_data = get_mnist(
-            root=data_dir, augment=bool(augment), label_noise=label_noise
+            root=data_dir,
+            augment=bool(augment),
+            label_noise=label_noise,
+            perm=bool(perm),
         )
     elif dataset == "fmnist":
         train_data, test_data = get_fmnist(
-            root=data_dir, augment=bool(augment), label_noise=label_noise
+            root=data_dir,
+            augment=bool(augment),
+            label_noise=label_noise,
+            perm=bool(perm),
         )
     else:
         raise NotImplementedError

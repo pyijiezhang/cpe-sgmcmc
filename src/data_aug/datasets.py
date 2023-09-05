@@ -93,6 +93,54 @@ _FMNIST_TEST_TRANSFORM = transforms.Compose(
     ]
 )
 
+rng_permute = np.random.RandomState(1)
+idx_permute_cifar = torch.from_numpy(rng_permute.permutation(1024))
+idx_permute_mnist = torch.from_numpy(rng_permute.permutation(784))
+
+
+def _permute_cifar(x):
+    x0 = x[0, :, :].view(-1)[idx_permute_cifar].view(32, 32)
+    x1 = x[1, :, :].view(-1)[idx_permute_cifar].view(32, 32)
+    x2 = x[2, :, :].view(-1)[idx_permute_cifar].view(32, 32)
+    return torch.stack([x0, x1, x2])
+
+
+def _permute_mnist(x):
+    return x.view(-1)[idx_permute_mnist].view(1, 28, 28)
+
+
+_CIFAR10_TRAIN_TRANSFORM_PERM = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        transforms.Lambda(_permute_cifar),
+    ]
+)
+
+_CIFAR100_TRAIN_TRANSFORM_PERM = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+        transforms.Lambda(_permute_cifar),
+    ]
+)
+
+_MNIST_TRAIN_TRANSFORM_PERM = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),
+        transforms.Lambda(_permute_mnist),
+    ]
+)
+
+_FMNIST_TRAIN_TRANSFORM_PERM = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize((0.286,), (0.353,)),
+        transforms.Lambda(_permute_mnist),
+    ]
+)
+
 
 # this and AugMixDataset copied from https://github.com/google-research/augmix/blob/master/cifar.py
 def aug(image, preprocess, mixture_width=3, mixture_depth=1, aug_severity=3):
@@ -326,13 +374,30 @@ def train_test_split(dataset, val_size=0.1, seed=None):
     return train, test
 
 
-def get_cifar10(root=None, label_noise=0, augment=True, n_aug=1, return_orig=False):
-    train_data = CIFAR10(
-        root=root,
-        train=True,
-        download=True,
-        transform=_CIFAR10_TRAIN_TRANSFORM if augment else _CIFAR10_TEST_TRANSFORM,
-    )
+def get_cifar10(
+    root=None, label_noise=0, augment=True, n_aug=1, return_orig=False, perm=False
+):
+    if augment:
+        train_data = CIFAR10(
+            root=root,
+            train=True,
+            download=True,
+            transform=_CIFAR10_TRAIN_TRANSFORM,
+        )
+    else:
+        train_data = CIFAR10(
+            root=root,
+            train=True,
+            download=True,
+            transform=_CIFAR10_TEST_TRANSFORM,
+        )
+    if perm:
+        train_data = CIFAR10(
+            root=root,
+            train=True,
+            download=True,
+            transform=_CIFAR10_TRAIN_TRANSFORM_PERM,
+        )
     if label_noise > 0:
         train_data = LabelNoiseDataset(train_data, n_labels=10, label_noise=label_noise)
     if augment and return_orig:
@@ -350,7 +415,9 @@ def get_cifar10(root=None, label_noise=0, augment=True, n_aug=1, return_orig=Fal
     return train_data, test_data
 
 
-def get_cifar100(root=None, label_noise=0, augment=True, n_aug=1, return_orig=False):
+def get_cifar100(
+    root=None, label_noise=0, augment=True, n_aug=1, return_orig=False, perm=False
+):
     if augment:
         train_data = CIFAR100(
             root=root, train=True, download=True, transform=_CIFAR100_TRAIN_TRANSFORM
@@ -358,6 +425,13 @@ def get_cifar100(root=None, label_noise=0, augment=True, n_aug=1, return_orig=Fa
     else:
         train_data = CIFAR100(
             root=root, train=True, download=True, transform=_CIFAR100_TEST_TRANSFORM
+        )
+    if perm:
+        train_data = CIFAR100(
+            root=root,
+            train=True,
+            download=True,
+            transform=_CIFAR100_TRAIN_TRANSFORM_PERM,
         )
     if label_noise > 0:
         train_data = LabelNoiseDataset(
@@ -410,7 +484,9 @@ def get_tiny_imagenet(
     return train_data, val_data
 
 
-def get_mnist(root=None, label_noise=0, augment=True, n_aug=1, return_orig=False):
+def get_mnist(
+    root=None, label_noise=0, augment=True, n_aug=1, return_orig=False, perm=False
+):
     if augment:
         train_data = MNIST(
             root=root, train=True, download=True, transform=_MNIST_TRAIN_TRANSFORM
@@ -418,6 +494,10 @@ def get_mnist(root=None, label_noise=0, augment=True, n_aug=1, return_orig=False
     else:
         train_data = MNIST(
             root=root, train=True, download=True, transform=_MNIST_TEST_TRANSFORM
+        )
+    if perm:
+        train_data = MNIST(
+            root=root, train=True, download=True, transform=_MNIST_TRAIN_TRANSFORM_PERM
         )
     if label_noise > 0:
         train_data = LabelNoiseDataset(train_data, n_labels=10, label_noise=label_noise)
@@ -436,7 +516,9 @@ def get_mnist(root=None, label_noise=0, augment=True, n_aug=1, return_orig=False
     return train_data, test_data
 
 
-def get_fmnist(root=None, label_noise=0, augment=True, n_aug=1, return_orig=False):
+def get_fmnist(
+    root=None, label_noise=0, augment=True, n_aug=1, return_orig=False, perm=False
+):
     if augment:
         train_data = FashionMNIST(
             root=root, train=True, download=True, transform=_FMNIST_TRAIN_TRANSFORM
@@ -444,6 +526,10 @@ def get_fmnist(root=None, label_noise=0, augment=True, n_aug=1, return_orig=Fals
     else:
         train_data = FashionMNIST(
             root=root, train=True, download=True, transform=_FMNIST_TEST_TRANSFORM
+        )
+    if perm:
+        train_data = FashionMNIST(
+            root=root, train=True, download=True, transform=_FMNIST_TRAIN_TRANSFORM_PERM
         )
     if label_noise > 0:
         train_data = LabelNoiseDataset(train_data, n_labels=10, label_noise=label_noise)
