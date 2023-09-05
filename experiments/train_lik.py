@@ -415,11 +415,11 @@ def main(
     )
     test_loader = DataLoader(test_data, batch_size=batch_size, num_workers=2)
 
-    if dirty_lik is True or dirty_lik == "std":
+    if dirty_lik is True or dirty_lik == "resnet18std":
         net = ResNet18(num_classes=train_data.total_classes).to(device)
-    elif dirty_lik is False or dirty_lik == "frn":
+    elif dirty_lik is False or dirty_lik == "resnet18frn":
         net = ResNet18FRN(num_classes=train_data.total_classes).to(device)
-    elif dirty_lik == "fixup":
+    elif dirty_lik == "resnet18fixup":
         net = ResNet18Fixup(num_classes=train_data.total_classes).to(device)
     elif dirty_lik == "lenetlarge":
         net = LeNetLarge(num_classes=train_data.total_classes).to(device)
