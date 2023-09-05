@@ -10,8 +10,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from data_aug.optim import SGLD
 from data_aug.optim.lr_scheduler import CosineLR
 from data_aug.utils import set_seeds
-from data_aug.models import ResNet18, ResNet18FRN, ResNet18Fixup
-from data_aug.datasets import get_cifar10, get_tiny_imagenet, prepare_transforms
+from data_aug.models import ResNet18, ResNet18FRN, ResNet18Fixup, LeNetLarge, LeNetSmall
+from data_aug.datasets import (
+    get_cifar10,
+    get_tiny_imagenet,
+    get_mnist,
+    get_fmnist,
+    prepare_transforms,
+)
 from data_aug.nn import (
     GaussianPriorAugmentedCELoss,
     KLAugmentedNoisyDirichletLoss,
@@ -371,6 +377,14 @@ def main(
         train_data, test_data = get_cifar10(
             root=data_dir, augment=bool(augment), label_noise=label_noise
         )
+    elif dataset == "mnist":
+        train_data, test_data = get_mnist(
+            root=data_dir, augment=bool(augment), label_noise=label_noise
+        )
+    elif dataset == "fmnist":
+        train_data, test_data = get_fmnist(
+            root=data_dir, augment=bool(augment), label_noise=label_noise
+        )
     else:
         raise NotImplementedError
 
@@ -388,6 +402,10 @@ def main(
         net = ResNet18FRN(num_classes=train_data.total_classes).to(device)
     elif dirty_lik == "fixup":
         net = ResNet18Fixup(num_classes=train_data.total_classes).to(device)
+    elif dirty_lik == "lenetlarge":
+        net = LeNetLarge(num_classes=train_data.total_classes).to(device)
+    elif dirty_lik == "lenetsmall":
+        net = LeNetSmall(num_classes=train_data.total_classes).to(device)
     # print(net)
 
     net = net.to(device)
