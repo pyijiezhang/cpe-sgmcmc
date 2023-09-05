@@ -13,6 +13,7 @@ from data_aug.utils import set_seeds
 from data_aug.models import ResNet18, ResNet18FRN, ResNet18Fixup, LeNetLarge, LeNetSmall
 from data_aug.datasets import (
     get_cifar10,
+    get_cifar100,
     get_tiny_imagenet,
     get_mnist,
     get_fmnist,
@@ -375,6 +376,10 @@ def main(
         )
     elif dataset == "cifar10":
         train_data, test_data = get_cifar10(
+            root=data_dir, augment=bool(augment), label_noise=label_noise
+        )
+    elif dataset == "cifar100":
+        train_data, test_data = get_cifar100(
             root=data_dir, augment=bool(augment), label_noise=label_noise
         )
     elif dataset == "mnist":
