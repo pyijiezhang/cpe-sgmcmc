@@ -266,7 +266,7 @@ def get_metrics_bma(net, logits_temp, data_loader, samples_dir, device=None):
     Y_pred = ens_logits.softmax(dim=-1).mean(dim=0).argmax(dim=-1)
     acc = (Y_pred == all_Y).sum().item() / Y_pred.size(0)
 
-    probs = torch.nn.functional.softmax(ens_logits, 2).squeeze(0)
+    probs = torch.nn.functional.softmax(ens_logits, 2).mean(0)
     p, f, w = calibration_curve(probs.numpy(), all_Y.numpy())
     ece = expected_calibration_error(p, f, w)
 
@@ -334,6 +334,7 @@ def run_sgd(
 
 def run_sgld(
     train_loader,
+    train_loader_eval,
     test_loader,
     net,
     criterion,
@@ -342,6 +343,7 @@ def run_sgld(
     lr=1e-2,
     momentum=0.9,
     temperature=1,
+    logits_temp=1,
     burn_in=0,
     n_samples=20,
     epochs=1,
@@ -349,6 +351,7 @@ def run_sgld(
 ):
     train_data = train_loader.dataset
     N = len(train_data)
+    num_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
 
     sgld = SGLD(net.parameters(), lr=lr, momentum=momentum, temperature=temperature)
     sample_int = (epochs - burn_in) // n_samples
@@ -367,41 +370,71 @@ def run_sgld(
 
             sgld.step()
 
-            if i % 50 == 0:
-                metrics = {
-                    "epoch": e,
-                    "mini_idx": i,
-                    "mini_loss": loss.detach().item(),
-                }
-                wandb.log({f"sgld/train/{k}": v for k, v in metrics.items()}, step=e)
+            # if i % 50 == 0:
+            #     metrics = {
+            #         "epoch": e,
+            #         "mini_idx": i,
+            #         "mini_loss": loss.detach().item(),
+            #     }
+            #     wandb.log({f"sgld/train/{k}": v for k, v in metrics.items()}, step=e)
 
-        test_metrics = test(test_loader, net, criterion, device=device)
-        wandb.log({f"sgld/test/{k}": v for k, v in test_metrics.items()}, step=e)
+        # test_metrics = test(test_loader, net, criterion, device=device)
+        # wandb.log({f"sgld/test/{k}": v for k, v in test_metrics.items()}, step=e)
 
-        logging.info(f"SGLD (Epoch {e}) : {test_metrics['acc']:.4f}")
+        # logging.info(f"SGLD (Epoch {e}) : {test_metrics['acc']:.4f}")
 
         if e + 1 > burn_in and (e + 1 - burn_in) % sample_int == 0:
             torch.save(net.state_dict(), samples_dir / f"s_e{e}.pt")
             wandb.save("samples/*.pt")
 
-            bma_test_metrics = test_bma(
-                net,
-                test_loader,
-                samples_dir,
-                nll_criterion=nll_criterion,
-                device=device,
+            # bma_test_metrics = test_bma(
+            #     net,
+            #     test_loader,
+            #     samples_dir,
+            #     nll_criterion=nll_criterion,
+            #     device=device,
+            # )
+            # wandb.log({f"sgld/test/bma_{k}": v for k, v in bma_test_metrics.items()})
+
+            # logging.info(f"SGLD BMA (Epoch {e}): {bma_test_metrics['acc']:.4f}")
+
+            bma_metrics_test = get_metrics_bma(
+                net, logits_temp, test_loader, samples_dir, device=device
             )
-            wandb.log({f"sgld/test/bma_{k}": v for k, v in bma_test_metrics.items()})
+            wandb.log(
+                {f"test/bma_{k}": v for k, v in bma_metrics_test.items()},
+                step=e,
+            )
 
-            logging.info(f"SGLD BMA (Epoch {e}): {bma_test_metrics['acc']:.4f}")
+            bma_metrics_train = get_metrics_bma(
+                net, logits_temp, train_loader_eval, samples_dir, device=device
+            )
+            wandb.log(
+                {f"train/bma_{k}": v for k, v in bma_metrics_train.items()},
+                step=e,
+            )
 
-    bma_test_metrics = test_bma(
-        net, test_loader, samples_dir, nll_criterion=nll_criterion, device=device
-    )
-    wandb.log({f"sgld/test/bma_{k}": v for k, v in bma_test_metrics.items()})
-    wandb.run.summary["sgld/test/bma_acc"] = bma_test_metrics["acc"]
+        # bma_test_metrics = test_bma(
+        #     net, test_loader, samples_dir, nll_criterion=nll_criterion, device=device
+        # )
+        # wandb.log({f"sgld/test/bma_{k}": v for k, v in bma_test_metrics.items()})
+        # wandb.run.summary["sgld/test/bma_acc"] = bma_test_metrics["acc"]
 
-    logging.info(f"SGLD BMA: {wandb.run.summary['sgld/test/bma_acc']:.4f}")
+        # logging.info(f"SGLD BMA: {wandb.run.summary['sgld/test/bma_acc']:.4f}")
+
+        mini_loss = loss.detach().item()
+        wandb.log({f"train/mini_loss": mini_loss}, step=e)
+
+        log_p_test, acc_test = get_metrics_training(
+            net, logits_temp, test_loader, device=device
+        )
+        wandb.log({f"test/acc": acc_test}, step=e)
+
+        nll_test = -log_p_test.mean().item()
+        wandb.log({f"test/nll": nll_test}, step=e)
+
+        params_avg_l2_norm = average_l2_norm(net, num_params)
+        wandb.log({f"train/params_avg_l2_norm": params_avg_l2_norm}, step=e)
 
 
 def run_csgld(
@@ -470,7 +503,7 @@ def run_csgld(
                         net, logits_temp, test_loader, samples_dir, device=device
                     )
                     wandb.log(
-                        {f"csgld/test/bma_{k}": v for k, v in bma_metrics_test.items()},
+                        {f"test/bma_{k}": v for k, v in bma_metrics_test.items()},
                         step=e,
                     )
 
@@ -478,10 +511,7 @@ def run_csgld(
                         net, logits_temp, train_loader_eval, samples_dir, device=device
                     )
                     wandb.log(
-                        {
-                            f"csgld/train/bma_{k}": v
-                            for k, v in bma_metrics_train.items()
-                        },
+                        {f"train/bma_{k}": v for k, v in bma_metrics_train.items()},
                         step=e,
                     )
 
@@ -498,7 +528,7 @@ def run_csgld(
         # }
 
         mini_loss = loss.detach().item()
-        wandb.log({f"csgld/train/mini_loss": mini_loss}, step=e)
+        wandb.log({f"train/mini_loss": mini_loss}, step=e)
 
         # test_metrics = test(test_loader, net, criterion, device=device)
 
@@ -509,13 +539,13 @@ def run_csgld(
         log_p_test, acc_test = get_metrics_training(
             net, logits_temp, test_loader, device=device
         )
-        wandb.log({f"csgld/test/acc": acc_test}, step=e)
+        wandb.log({f"test/acc": acc_test}, step=e)
 
         nll_test = -log_p_test.mean().item()
-        wandb.log({f"csgld/test/nll": nll_test}, step=e)
+        wandb.log({f"test/nll": nll_test}, step=e)
 
         params_avg_l2_norm = average_l2_norm(net, num_params)
-        wandb.log({f"csgld/train/params_avg_l2_norm": params_avg_l2_norm}, step=e)
+        wandb.log({f"train/params_avg_l2_norm": params_avg_l2_norm}, step=e)
 
     # bma_test_metrics = test_bma(
     #     net, test_loader, samples_dir, nll_criterion=nll_criterion, device=device
@@ -582,6 +612,7 @@ def main(
             "temperature": temperature,
             "burn_in": burn_in,
             "sgld_lr": sgld_lr,
+            "n_cycles": n_cycles,
             "dir_noise": noise,
             "likelihood": likelihood,
             "likelihood_T": likelihood_temp,
@@ -711,6 +742,7 @@ def main(
         else:
             run_sgld(
                 train_loader,
+                train_loader_eval,
                 test_loader,
                 net,
                 criterion,
