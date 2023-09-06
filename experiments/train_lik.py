@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from tqdm.auto import tqdm
 import wandb
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import SGD
@@ -24,6 +25,121 @@ from data_aug.nn import (
     KLAugmentedNoisyDirichletLoss,
     NoisyDirichletLoss,
 )
+
+
+def calibration_curve(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    num_bins: int = 10,
+    top_class_only: bool = True,
+    equal_size_bins: bool = False,
+    min_p: float = 0.0,
+):
+    if probabilities.ndim == targets.ndim + 1:
+        # multi-class
+        if top_class_only:
+            # targets are converted to per-datapoint accuracies, i.e. checking whether or not the predicted
+            # class was observed
+            predictions = np.cast[targets.dtype](probabilities.argmax(-1))
+            targets = targets == predictions
+            probabilities = probabilities.max(-1)
+        else:
+            # convert the targets to one-hot encodings and flatten both those targets and the probabilities,
+            # treating them as independent predictions for binary classification
+            num_classes = probabilities.shape[-1]
+            one_hot_targets = np.cast[targets.dtype](
+                targets[..., np.newaxis] == np.arange(num_classes)
+            )
+            targets = one_hot_targets.reshape(*targets.shape[:-1], -1)
+            probabilities = probabilities.reshape(*probabilities.shape[:-2], -1)
+
+    elif probabilities.ndim != targets.ndim:
+        raise ValueError(
+            "Shapes of probabilities and targets do not match. "
+            "Must be either equal (binary classification) or probabilities "
+            "must have exactly one dimension more (multi-class)."
+        )
+    else:
+        # binary predictions, no pre-processing to do
+        pass
+
+    if equal_size_bins:
+        quantiles = np.linspace(0, 1, num_bins + 1)
+        bin_edges = np.quantile(probabilities, quantiles)
+        # explicitly set upper and lower edge to be 0/1
+        bin_edges[0] = 0
+        bin_edges[-1] = 1
+    else:
+        bin_edges = np.linspace(0, 1, num_bins + 1)
+
+    # bin membership has to be checked with strict inequality to either the lower or upper
+    # edge to avoid predictions exactly on a boundary to be included in multiple bins.
+    # Therefore the exclusive boundary has to be slightly below or above the actual value
+    # to avoid 0 or 1 predictions to not be assigned to any bin
+    bin_edges[0] -= 1e-6
+    lower = bin_edges[:-1]
+    upper = bin_edges[1:]
+    probabilities = probabilities.reshape(-1, 1)
+    targets = targets.reshape(-1, 1)
+
+    # set up masks for checking which bin probabilities fall into and whether they are above the minimum
+    # threshold. I'm doing this by multiplication with those booleans rather than indexing in order to
+    # allow for the code to be extensible for broadcasting
+    bin_membership = (probabilities > lower) & (probabilities <= upper)
+    exceeds_threshold = probabilities >= min_p
+
+    bin_sizes = (bin_membership * exceeds_threshold).sum(-2)
+    non_empty = bin_sizes > 0
+
+    bin_probability = np.full(num_bins, np.nan)
+    np.divide(
+        (probabilities * bin_membership * exceeds_threshold).sum(-2),
+        bin_sizes,
+        out=bin_probability,
+        where=non_empty,
+    )
+
+    bin_frequency = np.full(num_bins, np.nan)
+    np.divide(
+        (targets * bin_membership * exceeds_threshold).sum(-2),
+        bin_sizes,
+        out=bin_frequency,
+        where=non_empty,
+    )
+
+    bin_weights = np.zeros(num_bins)
+    np.divide(bin_sizes, bin_sizes.sum(), out=bin_weights, where=non_empty)
+
+    return bin_probability, bin_frequency, bin_weights
+
+
+def expected_calibration_error(
+    mean_probability_predicted: np.ndarray,
+    observed_frequency: np.ndarray,
+    bin_weights: np.ndarray,
+):
+    """Calculates the ECE, i.e. the average absolute difference between predicted probabilities and
+    true observed frequencies for a classifier and its targets. Inputs are expected to be formatted
+    as the return values from the calibration_curve method. NaNs in mean_probability_predicted and
+    observed_frequency are ignored if the corresponding entry in bin_weights is 0."""
+    idx = bin_weights > 0
+    return np.sum(
+        np.abs(mean_probability_predicted[idx] - observed_frequency[idx])
+        * bin_weights[idx]
+    )
+
+
+def average_l2_norm(model, num_params):
+    total_norm = 0.0
+    for param in model.parameters():
+        if param.requires_grad:
+            param_norm = param.norm(2)  # Calculate L2 norm for the parameter
+            total_norm += param_norm.item() ** 2  # Add the squared norm to the total
+
+    average_norm = (
+        total_norm / num_params
+    ) ** 0.5  # Calculate the square root to get the L2 norm
+    return average_norm
 
 
 @torch.no_grad()
@@ -95,6 +211,66 @@ def test_bma(net, data_loader, samples_dir, nll_criterion=None, device=None):
     acc = (Y_pred == all_Y).sum().item() / Y_pred.size(0)
 
     return {"acc": acc, "nll": nll, "ce_nll": ce_nll}
+
+
+@torch.no_grad()
+def get_metrics_training(net, logits_temp, data_loader, device=None):
+    net.eval()
+
+    all_logits = []
+    all_Y = []
+    for X, Y in tqdm(data_loader, leave=False):
+        X, Y = X.to(device), Y.to(device)
+        _logits = net(X)
+        all_logits.append(_logits)
+        all_Y.append(Y)
+    all_logits = torch.cat(all_logits)
+    all_logits.div_(logits_temp)
+    all_Y = torch.cat(all_Y)
+
+    log_p = torch.distributions.Categorical(logits=all_logits).log_prob(all_Y)
+    Y_pred = all_logits.softmax(dim=-1).argmax(dim=-1)
+    acc = (Y_pred == all_Y).sum().item() / Y_pred.size(0)
+    return log_p, acc
+
+
+@torch.no_grad()
+def get_metrics_bma(net, logits_temp, data_loader, samples_dir, device=None):
+    net.eval()
+
+    ens_logits = []
+    for sample_path in tqdm(Path(samples_dir).rglob("*.pt"), leave=False):
+        net.load_state_dict(torch.load(sample_path))
+
+        all_logits = []
+        all_Y = []
+        for X, Y in tqdm(data_loader, leave=False):
+            X, Y = X.to(device), Y.to(device)
+            _logits = net(X)
+            all_logits.append(_logits)
+            all_Y.append(Y)
+        all_logits = torch.cat(all_logits)
+        all_logits.div_(logits_temp)
+        all_Y = torch.cat(all_Y)
+
+        ens_logits.append(all_logits)
+
+    ens_logits = torch.stack(ens_logits)
+
+    log_p = torch.distributions.Categorical(logits=ens_logits).log_prob(all_Y)
+    log_p_bayes = torch.logsumexp(log_p, 0) - torch.log(torch.tensor(log_p.shape[0]))
+
+    gibbs_nll = -log_p.mean()
+    bayes_nll = -log_p_bayes.mean()
+
+    Y_pred = ens_logits.softmax(dim=-1).mean(dim=0).argmax(dim=-1)
+    acc = (Y_pred == all_Y).sum().item() / Y_pred.size(0)
+
+    probs = torch.nn.functional.softmax(ens_logits, 2).squeeze(0)
+    p, f, w = calibration_curve(probs.numpy(), all_Y.numpy())
+    ece = expected_calibration_error(p, f, w)
+
+    return {"acc": acc, "gibbs_nll": gibbs_nll, "bayes_nll": bayes_nll, "ece": ece}
 
 
 def run_sgd(
@@ -230,6 +406,7 @@ def run_sgld(
 
 def run_csgld(
     train_loader,
+    train_loader_eval,
     test_loader,
     net,
     criterion,
@@ -238,6 +415,7 @@ def run_csgld(
     lr=1e-2,
     momentum=0.9,
     temperature=1,
+    logits_temp=1,
     n_samples=20,
     n_cycles=1,
     epochs=1,
@@ -245,6 +423,7 @@ def run_csgld(
 ):
     train_data = train_loader.dataset
     N = len(train_data)
+    num_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
 
     sgld = SGLD(net.parameters(), lr=lr, momentum=momentum, temperature=temperature)
     sgld_scheduler = CosineLR(
@@ -272,48 +451,85 @@ def run_csgld(
                     torch.save(net.state_dict(), samples_dir / f"s_e{e}_m{i}.pt")
                     wandb.save("samples/*.pt")
 
-                    bma_test_metrics = test_bma(
-                        net,
-                        test_loader,
-                        samples_dir,
-                        nll_criterion=nll_criterion,
-                        device=device,
+                    # bma_test_metrics = test_bma(
+                    #     net,
+                    #     test_loader,
+                    #     samples_dir,
+                    #     nll_criterion=nll_criterion,
+                    #     device=device,
+                    # )
+                    # wandb.log(
+                    #     {f"csgld/test/bma_{k}": v for k, v in bma_test_metrics.items()}
+                    # )
+
+                    # logging.info(
+                    #     f"cSGLD BMA (Epoch {e}): {bma_test_metrics['acc']:.4f}"
+                    # )
+
+                    bma_metrics_test = get_metrics_bma(
+                        net, logits_temp, test_loader, samples_dir, device=device
                     )
                     wandb.log(
-                        {f"csgld/test/bma_{k}": v for k, v in bma_test_metrics.items()}
+                        {f"csgld/test/bma_{k}": v for k, v in bma_metrics_test.items()},
+                        step=e,
                     )
 
-                    logging.info(
-                        f"cSGLD BMA (Epoch {e}): {bma_test_metrics['acc']:.4f}"
+                    bma_metrics_train = get_metrics_bma(
+                        net, logits_temp, train_loader_eval, samples_dir, device=device
                     )
+                    wandb.log(
+                        {
+                            f"csgld/train/bma_{k}": v
+                            for k, v in bma_metrics_train.items()
+                        },
+                        step=e,
+                    )
+
+                    # logging.info(
+                    #     f"csgld bma train nll (epoch {e}): {bma_metrics_train['bayes_nll']:.4f}"
+                    # )
 
             sgld_scheduler.step()
 
-            if i % 50 == 0:
-                metrics = {
-                    "epoch": e,
-                    "mini_idx": i,
-                    "mini_loss": loss.detach().item(),
-                }
-                wandb.log({f"csgld/train/{k}": v for k, v in metrics.items()}, step=e)
+            # if i % 50 == 0:
+        # metrics = {
+        #     "epoch": e,
+        #     "mini_loss": loss.detach().item(),
+        # }
 
-        test_metrics = test(test_loader, net, criterion, device=device)
+        mini_loss = loss.detach().item()
+        wandb.log({f"csgld/train/mini_loss": mini_loss}, step=e)
 
-        wandb.log({f"csgld/test/{k}": v for k, v in test_metrics.items()}, step=e)
+        # test_metrics = test(test_loader, net, criterion, device=device)
 
-        logging.info(f"cSGLD (Epoch {e}) : {test_metrics['acc']:.4f}")
+        # wandb.log({f"csgld/test/{k}": v for k, v in test_metrics.items()}, step=e)
 
-    bma_test_metrics = test_bma(
-        net, test_loader, samples_dir, nll_criterion=nll_criterion, device=device
-    )
+        # logging.info(f"cSGLD (Epoch {e}) : {test_metrics['acc']:.4f}")
 
-    wandb.log({f"csgld/test/bma_{k}": v for k, v in bma_test_metrics.items()})
-    wandb.run.summary["csgld/test/bma_acc"] = bma_test_metrics["acc"]
+        log_p_test, acc_test = get_metrics_training(
+            net, logits_temp, test_loader, device=device
+        )
+        wandb.log({f"csgld/test/acc": acc_test}, step=e)
 
-    logging.info(f"cSGLD BMA: {wandb.run.summary['csgld/test/bma_acc']:.4f}")
+        nll_test = -log_p_test.mean().item()
+        wandb.log({f"csgld/test/nll": nll_test}, step=e)
+
+        params_avg_l2_norm = average_l2_norm(net, num_params)
+        wandb.log({f"csgld/train/params_avg_l2_norm": params_avg_l2_norm}, step=e)
+
+    # bma_test_metrics = test_bma(
+    #     net, test_loader, samples_dir, nll_criterion=nll_criterion, device=device
+    # )
+
+    # wandb.log({f"csgld/test/bma_{k}": v for k, v in bma_test_metrics.items()})
+    # wandb.run.summary["csgld/test/bma_acc"] = bma_test_metrics["acc"]
+
+    # logging.info(f"cSGLD BMA: {wandb.run.summary['csgld/test/bma_acc']:.4f}")
 
 
 def main(
+    project_name=None,
+    wandb_mode=None,
     seed=None,
     device=0,
     data_dir="./",
@@ -349,7 +565,11 @@ def main(
     set_seeds(seed)
     device = f"cuda:{device}" if (device >= 0 and torch.cuda.is_available()) else "cpu"
 
+    run_name = f"{likelihood_temp}_{logits_temp}_{prior_scale}_{augment}"
     wandb.init(
+        project=project_name,
+        name=f"{run_name}",
+        mode=wandb_mode,
         config={
             "seed": seed,
             "dataset": dataset,
@@ -366,7 +586,7 @@ def main(
             "likelihood": likelihood,
             "likelihood_T": likelihood_temp,
             "logits_temp": logits_temp,
-        }
+        },
     )
 
     samples_dir = Path(wandb.run.dir) / "samples"
@@ -413,6 +633,7 @@ def main(
     train_loader = DataLoader(
         train_data, batch_size=batch_size, num_workers=2, shuffle=True
     )
+    train_loader_eval = DataLoader(train_data, batch_size=batch_size, num_workers=2)
     test_loader = DataLoader(test_data, batch_size=batch_size, num_workers=2)
 
     if dirty_lik is True or dirty_lik == "resnet18std":
@@ -473,6 +694,7 @@ def main(
         if n_cycles:
             run_csgld(
                 train_loader,
+                train_loader_eval,
                 test_loader,
                 net,
                 criterion,
