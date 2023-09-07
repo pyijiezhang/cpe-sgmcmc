@@ -11,7 +11,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from data_aug.optim import SGLD
 from data_aug.optim.lr_scheduler import CosineLR
 from data_aug.utils import set_seeds
-from data_aug.models import ResNet18, ResNet18FRN, ResNet18Fixup, LeNetLarge, LeNetSmall
+from data_aug.models import (
+    ResNet18,
+    ResNet18FRN,
+    ResNet18Fixup,
+    LeNetLarge,
+    LeNetSmall,
+    MLP,
+)
 from data_aug.datasets import (
     get_cifar10,
     get_cifar100,
@@ -584,6 +591,7 @@ def main(
     burn_in=0,
     n_samples=20,
     n_cycles=0,
+    test_overfit=False,
 ):
     if data_dir is None and os.environ.get("DATADIR") is not None:
         data_dir = os.environ.get("DATADIR")
@@ -658,26 +666,50 @@ def main(
     else:
         raise NotImplementedError
 
+    if test_overfit:
+        train_data = torch.utils.data.Subset(train_data, range(10))
+        if dirty_lik == "lenetlarge":
+            net = LeNetLarge(num_classes=10).to(device)
+        elif dirty_lik == "lenetsmall":
+            net = LeNetSmall(num_classes=10).to(device)
+        elif dirty_lik == "mlp":
+            net = MLP(num_classes=10).to(device)
+
     if type(augment) is not bool and augment != "true":
         train_data = prepare_transforms(augment=augment, train_data=train_data)
         # train_data.transform = prepare_transforms(augment=augment)
     train_loader = DataLoader(
-        train_data, batch_size=batch_size, num_workers=2, shuffle=True
+        train_data,
+        batch_size=batch_size,
+        num_workers=2,
+        shuffle=True,
+        pin_memory=True,
     )
-    train_loader_eval = DataLoader(train_data, batch_size=batch_size, num_workers=2)
-    test_loader = DataLoader(test_data, batch_size=batch_size, num_workers=2)
+    train_loader_eval = DataLoader(
+        train_data,
+        batch_size=batch_size,
+        num_workers=2,
+        pin_memory=True,
+    )
+    test_loader = DataLoader(
+        test_data,
+        batch_size=batch_size,
+        num_workers=2,
+        pin_memory=True,
+    )
 
-    if dirty_lik is True or dirty_lik == "resnet18std":
-        net = ResNet18(num_classes=train_data.total_classes).to(device)
-    elif dirty_lik is False or dirty_lik == "resnet18frn":
-        net = ResNet18FRN(num_classes=train_data.total_classes).to(device)
-    elif dirty_lik == "resnet18fixup":
-        net = ResNet18Fixup(num_classes=train_data.total_classes).to(device)
-    elif dirty_lik == "lenetlarge":
-        net = LeNetLarge(num_classes=train_data.total_classes).to(device)
-    elif dirty_lik == "lenetsmall":
-        net = LeNetSmall(num_classes=train_data.total_classes).to(device)
-    # print(net)
+    if not test_overfit:
+        if dirty_lik is True or dirty_lik == "resnet18std":
+            net = ResNet18(num_classes=train_data.total_classes).to(device)
+        elif dirty_lik is False or dirty_lik == "resnet18frn":
+            net = ResNet18FRN(num_classes=train_data.total_classes).to(device)
+        elif dirty_lik == "resnet18fixup":
+            net = ResNet18Fixup(num_classes=train_data.total_classes).to(device)
+        elif dirty_lik == "lenetlarge":
+            net = LeNetLarge(num_classes=train_data.total_classes).to(device)
+        elif dirty_lik == "lenetsmall":
+            net = LeNetSmall(num_classes=train_data.total_classes).to(device)
+        # print(net)
 
     net = net.to(device)
     if ckpt_path is not None and ckpt_path.is_file():
