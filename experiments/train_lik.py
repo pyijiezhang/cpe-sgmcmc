@@ -267,7 +267,7 @@ def get_metrics_bma(net, logits_temp, data_loader, samples_dir, device=None):
     acc = (Y_pred == all_Y).sum().item() / Y_pred.size(0)
 
     probs = torch.nn.functional.softmax(ens_logits, 2).mean(0)
-    p, f, w = calibration_curve(probs.numpy(), all_Y.numpy())
+    p, f, w = calibration_curve(probs.cpu().numpy(), all_Y.cpu().numpy())
     ece = expected_calibration_error(p, f, w)
 
     return {"acc": acc, "gibbs_nll": gibbs_nll, "bayes_nll": bayes_nll, "ece": ece}
