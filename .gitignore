@@ -1,0 +1,11 @@
+# ignore slurm files
+*.out
+
+# ignore wandb folder
+wandb/
+
+# ignore wandb folder
+MNIST/
+FashionMNIST
+
+*.pyc
